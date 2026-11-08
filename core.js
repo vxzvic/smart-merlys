@@ -277,7 +277,7 @@ function pBg(color, cfg){ const c = cfg ? CUSTOM_COLORS[cfg.body] : (COLORS[colo
 const routes = [];
 const route = (pattern, view, opts={}) => routes.push({re:new RegExp('^'+pattern.replace(/:(\w+)/g,'(?<$1>[^/]+)')+'$'), view, ...opts});
 let CUR = {path:'/', params:{}, query:{}};
-function parseHash(){ const h = decodeURIComponent(location.hash.slice(1)) || '/'; const [path, qs] = h.split('?'); return {path: path||'/', query:Object.fromEntries(new URLSearchParams(qs||''))}; }
+function parseHash(){ const h = decodeURIComponent(location.hash.slice(1)) || '/'; let [path, qs] = h.split('?'); path = '/' + (path||'').replace(/^\/+/,'').replace(/\/+$/,''); return {path, query:Object.fromEntries(new URLSearchParams(qs||''))}; }
 function go(path){ if (location.hash.slice(1)===path) render(); else location.hash = path; }
 function qset(patch){ const q = {...CUR.query, ...patch}; Object.keys(q).forEach(k=>{ if (q[k]===''||q[k]==null) delete q[k]; }); const qs = new URLSearchParams(q).toString(); go(CUR.path + (qs?'?'+qs:'')); }
 function render(){
@@ -291,7 +291,7 @@ function render(){
     if (r.perm && !can(r.perm)) return show(unauthorized(`Your role (${u.role}) does not have permission to open this module.`, true));
     show(r.view(CUR)); window.scrollTo(0,0); return;
   }
-  show(notFound());
+  CUR = {path, params:{}, query}; show(notFound());
 }
 function show(html){ document.getElementById('app').innerHTML = html; afterRender.forEach(f=>f()); afterRender.length=0; document.title = (document.querySelector('[data-title]')?.dataset.title || 'SMART') + " · Merly's Scrubsuits"; }
 const afterRender = [];
@@ -310,6 +310,7 @@ document.addEventListener('change', e => { const a = e.target.closest('[data-cha
 document.addEventListener('input', e => { const a = e.target.closest('[data-input]'); if (a) ACTIONS[a.dataset.input]?.(a, e); const f=e.target.closest('.field.has-error'); if (f && e.target.value) f.classList.remove('has-error'); });
 document.addEventListener('keydown', e => { if (e.key==='Escape'){ closeModal(); closeAllMenus(); } });
 on('go', a => go(a.dataset.to));
+on('skip', () => { const m=document.querySelector('main, .main, #app'); m?.setAttribute('tabindex','-1'); m?.focus(); });
 on('menu', a => { const d=a.closest('.dropdown'); const was=d.classList.contains('open'); closeAllMenus(); if(!was) d.classList.add('open'); });
 function closeAllMenus(){ document.querySelectorAll('.dropdown.open').forEach(d=>d.classList.remove('open')); }
 on('qset', a => qset(JSON.parse(a.dataset.q)));
@@ -379,7 +380,11 @@ function unauthorized(msg, inMis){
   return `<div data-title="Access denied" class="portal" style="max-width:520px;padding-top:80px">${emptyState('lock','Access denied (403)', esc(msg)+' If you think this is a mistake, contact the system administrator.',
    `<div class="row"><button class="btn btn-outline" data-act="go" data-to="${inMis?'/mis':'/'}">${ic('arrowL')} ${inMis?'Back to dashboard':'Back to storefront'}</button>${me()?`<button class="btn btn-ghost" data-act="logout">${ic('logout')} Sign out</button>`:''}</div>`)}</div>`;
 }
-function notFound(){ return `<div data-title="Not found" class="portal" style="padding-top:80px">${emptyState('search','Page not found (404)','The page you were looking for does not exist or was moved.',`<button class="btn btn-primary" data-act="go" data-to="/">Go to storefront</button>`)}</div>`; }
+function notFound(){
+  const body = `<div class="container" style="max-width:640px;padding-top:56px;padding-bottom:24px" data-title="Page not found">${emptyState('search','Page not found (404)',`We couldn't find <code>${esc(CUR.path)}</code>. If you followed an old link, the page may have moved. If the site was just updated, refresh the page (Ctrl+Shift+R).`,
+    `<div class="row wrap" style="justify-content:center"><button class="btn btn-primary" data-act="go" data-to="/">Go to storefront</button><button class="btn btn-outline" data-act="go" data-to="/catalog">Browse catalog</button><button class="btn btn-ghost" data-act="go" data-to="/terms">Terms & Privacy</button></div>`)}</div>`;
+  return typeof shop==='function' && !CUR.path.startsWith('/mis') ? shop(body,{title:'Page not found'}) : body;
+}
 function demoBar(){
   return `<div class="demo-bar dropdown"><button class="demo-fab" data-act="menu" aria-haspopup="true">${ic('wand')} Demo controls</button>
     <div class="dd-menu" role="menu">
