@@ -318,13 +318,15 @@ on('reset-demo', () => confirmModal({title:'Reset demo data?', body:'All orders,
 on('logout', () => { const role = me()?.role; S.session=null; save(); toast('You have been signed out','ok'); go(role==='customer'?'/':'/portal?role='+(role||'staff')); });
 
 /* ---------------- Toast / modal / loading ---------------- */
-function toast(msg, kind='ok'){
+function toast(msg, kind='ok', action=null){
   let box = document.querySelector('.toasts'); if (!box){ box=document.createElement('div'); box.className='toasts'; box.setAttribute('role','status'); box.setAttribute('aria-live','polite'); document.body.appendChild(box); }
-  const t = document.createElement('div'); t.className='toast '+kind; t.innerHTML = ic(kind==='ok'?'checkC':kind==='err'?'xc':kind==='warn'?'alert':'info') + `<div>${msg}</div>`;
-  box.appendChild(t); setTimeout(()=>{ t.style.opacity='0'; t.style.transition='opacity .3s'; setTimeout(()=>t.remove(),300); }, 3600);
+  const t = document.createElement('div'); t.className='toast '+kind; t.innerHTML = ic(kind==='ok'?'checkC':kind==='err'?'xc':kind==='warn'?'alert':'info') + `<div style="flex:1">${msg}${action?`<div class="toast-timer"><i style="animation-duration:${action.ms||10000}ms"></i></div>`:''}</div>`;
+  const kill = () => { t.style.opacity='0'; t.style.transition='opacity .3s'; setTimeout(()=>t.remove(),300); };
+  if (action){ const b=document.createElement('button'); b.className='toast-action'; b.textContent=action.label; b.onclick=()=>{ clearTimeout(timer); kill(); action.fn(); }; t.appendChild(b); }
+  box.appendChild(t); const timer = setTimeout(()=>{ kill(); action?.onExpire?.(); }, action ? (action.ms||10000) : 3600);
 }
 let modalCb = {};
-function modal(html, {lg=false, ...cbs}={}){ closeModal(); modalCb = cbs; const o=document.createElement('div'); o.className='overlay'; o.innerHTML=`<div class="modal ${lg?'lg':''}" role="dialog" aria-modal="true">${html}</div>`; o.addEventListener('click',e=>{ if(e.target===o) closeModal(); }); document.body.appendChild(o); setTimeout(()=>o.querySelector('input,textarea,select,.btn-primary,.btn-danger')?.focus(),50); }
+function modal(html, {lg=false, focus, ...cbs}={}){ closeModal(); modalCb = cbs; const o=document.createElement('div'); o.className='overlay'; o.innerHTML=`<div class="modal ${lg?'lg':''}" role="dialog" aria-modal="true">${html}</div>`; o.addEventListener('click',e=>{ if(e.target===o) closeModal(); }); document.body.appendChild(o); setTimeout(()=>o.querySelector(focus||'input,textarea,select,.btn-primary,.btn-danger')?.focus(),50); }
 function closeModal(){ document.querySelectorAll('.overlay').forEach(o=>o.remove()); }
 on('modal-close', closeModal);
 on('modal-ok', a => modalCb.onOk?.(a));

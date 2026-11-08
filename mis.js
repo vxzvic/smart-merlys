@@ -166,35 +166,70 @@ route('/mis/orders/:id', ({params}) => {
 }, {auth:'mis', perm:'orders'});
 on('print', () => window.print());
 on('form:ord-note', async f => { await busy(f.querySelector('button'),400); S.orders.find(o=>o.id===f.dataset.id).staffNote=f.note.value; save(); toast('Note saved','ok'); });
+/* Status updates are deliberately "hard to misclick":
+   1) the modal shows FROM → TO and the order summary, 2) Confirm stays disabled until the staff member ticks a
+   step-specific acknowledgement (and, for Shipped, re-enters the tracking number; for final steps, types the
+   last 4 digits of the order number), 3) Enter never submits, focus starts on Cancel, 4) a 10-second Undo toast
+   restores the previous state and records the reversal in the order history. */
+const ACK = {
+  'Processing': o => o.method==='cod' ? 'I phoned the customer and they confirmed this Cash on Delivery order.' : 'I checked the items and quantities below are correct.',
+  'Ready to Ship': () => 'I packed and labelled the parcel and checked it matches the items below.',
+  'Shipped': () => 'I handed this parcel to the courier and double-checked the tracking number.',
+  'Delivered': o => o.method==='cod' ? 'The courier/customer confirmed receipt and I counted the cash.' : 'The courier or customer confirmed this order was received.',
+  'Cancelled': () => 'I understand cancelling cannot be undone after 10 seconds and the customer will be notified.',
+};
+const FINAL = ['Delivered','Cancelled'];
 on('ord-move', a => {
-  const o=S.orders.find(x=>x.id===a.dataset.id); const to=a.dataset.to; const needs=a.dataset.needs;
-  const extra = needs==='tracking'? `<div style="margin-top:12px">${field({name:'track', label:'Courier & tracking no.', required:true, ph:'e.g. LBC 1234 5678 90'})}</div>`
-    : needs==='cash' ? `<div style="margin-top:12px" class="col">${field({name:'cash', label:'Cash amount received (₱)', required:true, value:o.total})}<div class="hint">Order total: ${peso(o.total)}</div></div>`
-    : to==='Cancelled' ? `<div style="margin-top:12px">${field({name:'reason', label:'Reason for cancellation', required:true, options:[['','Select a reason…'],'Customer requested','No payment received within 3 days','Duplicate order','Item unavailable','Other']})}</div>` : '';
-  const body = to==='Processing' ? `Move <b>${o.id}</b> to <b>Processing</b>? This will <b>deduct stock</b> for ${o.items.reduce((s,i)=>s+i.qty,0)} item(s).${o.method==='cod'?' Confirm you have spoken to the customer by phone.':''}`
-    : to==='Cancelled' ? `Cancel order <b>${o.id}</b>? The customer will be notified.` : `Change status of <b>${o.id}</b> from <b>${o.status}</b> to <b>${to}</b>?`;
-  confirmModal({title: to==='Cancelled'?'Cancel order':`Update status → ${to}`, body, extra, ok: to==='Cancelled'?'Cancel order':'Confirm update', danger:to==='Cancelled', icon: to==='Cancelled'?'ban':'clipboard', onOk: async btn => {
-    const m = btn.closest('.modal');
-    const val = n => m.querySelector(`[name=${n}]`)?.value.trim();
-    const bad = n => { m.querySelector(`[name=${n}]`).closest('.field').classList.add('has-error'); m.querySelector(`[name=${n}]`).closest('.field').querySelector('.err').textContent='This field is required'; };
-    if (needs==='tracking' && !val('track')) return bad('track');
-    if (needs==='cash' && !(Number(val('cash'))>=o.total)){ const fld=m.querySelector('[name=cash]').closest('.field'); fld.classList.add('has-error'); fld.querySelector('.err').textContent=`Cash received must be at least ${peso(o.total)}`; return; }
-    if (to==='Cancelled' && !val('reason')) return bad('reason');
-    // validate transition & stock
-    const allowed = nextActions(o).some(x=>x.to===to);
-    if (!allowed){ toast(`Invalid status change: ${o.status} → ${to}`,'err'); closeModal(); return; }
-    if (to==='Processing' && !o.stockDeducted){
-      const short = stockItems(o).filter(i=>{ const r=variantBySku(i.sku); return !r || r.v.stock<i.qty; });
-      if (short.length){ closeModal(); confirmModal({title:'Insufficient stock', body:`Cannot start processing — not enough stock for ${short.map(i=>`<b>${i.sku}</b>`).join(', ')}. Inventory cannot go negative. Restock first.`, ok:'Go to inventory', icon:'alert', danger:true, onOk:()=>{ closeModal(); go('/mis/inventory?q='+short[0].sku); }}); return; }
-    }
-    await busy(btn, 600);
-    if (to==='Processing' && !o.stockDeducted){ stockItems(o).forEach(i=>{ const r=variantBySku(i.sku); const before=r.v.stock; r.v.stock-=i.qty; S.stockLog.unshift({id:uid('ST'), at:new Date().toISOString(), sku:i.sku, product:i.name, change:-i.qty, before, after:r.v.stock, reason:`Order ${o.id} (Processing)`, by:'System'}); }); o.stockDeducted=true; }
-    let note = to==='Processing'?(o.method==='cod'?'COD order confirmed by phone · stock deducted':'Stock deducted') : to==='Ready to Ship'?'Packed and labelled' : to==='Shipped'?'Handed to courier · '+val('track') : to==='Delivered'?(needs==='cash'?`Delivered · cash ${peso(val('cash'))} collected`:'Delivered to customer') : 'Cancelled: '+val('reason');
-    o.status=to; addHistory(o,to,me().name,note);
-    if (needs==='cash'){ o.paymentStatus='Cash Collected'; S.payments.unshift({id:uid('PAY'), orderId:o.id, customerName:o.customerName, method:'cod', amount:Number(val('cash')), ref:'CASH-'+o.id.slice(-4), submitted:new Date().toISOString(), status:'Verified', reviewedBy:me().name, reviewedAt:new Date().toISOString(), note:'Cash collected on delivery'}); }
-    if (to==='Cancelled' && o.paymentStatus==='Pending Verification'){ S.payments.filter(p=>p.orderId===o.id&&p.status==='Pending Verification').forEach(p=>{p.status='Rejected'; p.reason='Order cancelled: '+val('reason'); p.reviewedBy=me().name; p.reviewedAt=new Date().toISOString();}); o.paymentStatus='Rejected'; }
-    notify(o.customerId, `Order ${o.id} is now ${to}.`, '/account/orders/'+o.id);
-    save(); closeModal(); toast(`${o.id} updated to ${to}`,'ok'); render(); }});
+  const o=S.orders.find(x=>x.id===a.dataset.id); const to=a.dataset.to; const needs=a.dataset.needs; const last4=o.id.slice(-4);
+  const fields = (needs==='tracking'? field({name:'track', label:'Courier & tracking no.', required:true, ph:'e.g. LBC 1234 5678 90'}) + field({name:'track2', label:'Re-enter tracking no.', required:true, ph:'Type it again to avoid typos', attrs:'autocomplete="off"'}) : '')
+    + (needs==='cash' ? field({name:'cash', label:'Cash amount received (₱)', required:true, value:o.total, hint:`Order total: ${peso(o.total)}`}) : '')
+    + (to==='Cancelled' ? field({name:'reason', label:'Reason for cancellation', required:true, options:[['','Select a reason…'],'Customer requested','No payment received within 3 days','Duplicate order','Item unavailable','Other']}) : '')
+    + (FINAL.includes(to) ? field({name:'code', label:`Type the last 4 digits of the order number (${o.id.slice(0,-4)}••••)`, required:true, ph:'e.g. '+last4.replace(/./g,'0'), attrs:'inputmode="numeric" maxlength="4" autocomplete="off"', hint:'This step is final, so we ask you to type it.'}) : '');
+  const consequence = to==='Processing' ? `Stock will be deducted for ${stockItems(o).reduce((s,i)=>s+i.qty,0)} item(s).` : to==='Shipped' ? 'The customer will see “Shipped” and the tracking number in My orders.' : to==='Delivered' ? 'This completes the order. You will have 10 seconds to undo; after that it is final.' : to==='Cancelled' ? 'The order is closed and the customer is told not to pay. You will have 10 seconds to undo; after that it is final.' : 'The customer will see this update in My orders.';
+  const danger = to==='Cancelled';
+  modal(`<div class="mh"><div><div class="m-icon" style="background:${danger?'var(--red-bg)':'var(--lime-200)'};color:${danger?'var(--red)':'var(--olive-800)'}">${ic(danger?'ban':to==='Shipped'?'truck':'clipboard')}</div><h3>Are you sure?</h3><p class="small muted" style="margin-top:4px">You're about to change the status of <b>${o.id}</b>.</p></div><button class="icon-btn" data-act="modal-close" aria-label="Close">${ic('x')}</button></div>
+    <form class="mb col" data-form="ord-move" data-id="${o.id}" data-to="${to}" data-needs="${needs||''}" novalidate style="gap:14px">
+      <div class="status-swap"><div><div class="xs muted">Current</div>${badge(o.status)}</div><span class="arrow">${ic('arrowR')}</span><div><div class="xs muted">New</div>${badge(to)}</div></div>
+      <div class="card tight flat" style="padding:12px 14px"><div class="row between small"><b>${esc(o.customerName)}</b><b>${peso(o.total)}</b></div><div class="xs muted" style="margin-top:4px">${o.items.map(i=>`${i.qty}× ${esc(i.name)} (${i.custom?'custom':esc(i.color)}, ${i.size})`).join(' · ')}</div></div>
+      <p class="small">${consequence}</p>
+      ${fields}
+      <label class="check ack"><input type="checkbox" name="ack" data-change="ack-toggle"><span class="small">${ACK[to](o)}</span></label>
+      <div class="row" style="justify-content:flex-end;gap:10px"><button type="button" class="btn btn-outline" data-act="modal-close" id="ord-cancel">Go back</button><button type="button" class="btn ${danger?'btn-danger':'btn-primary'}" data-act="ord-move-confirm" disabled data-loading="Updating…">${danger?'Yes, cancel order':`Yes, mark as ${to}`}</button></div>
+    </form>`, {focus:'#ord-cancel'});
+});
+on('ack-toggle', a => { a.closest('form').querySelector('[data-act=ord-move-confirm]').disabled = !a.checked; });
+on('form:ord-move', () => {}); // Enter key never submits a status change
+on('ord-move-confirm', async btn => {
+  const f = btn.closest('form'); const o=S.orders.find(x=>x.id===f.dataset.id); const to=f.dataset.to; const needs=f.dataset.needs;
+  if (!f.ack.checked) return;
+  const ok = validate(f, {
+    ...(needs==='tracking' ? {track:[req('Enter the courier and tracking number'), minLen(6,'Tracking number looks too short')], track2:[req('Re-enter the tracking number'), [(v,fm)=>v.replace(/\s/g,'').toUpperCase()===fm.track.value.replace(/\s/g,'').toUpperCase(),'Tracking numbers do not match']]} : {}),
+    ...(needs==='cash' ? {cash:[req('Enter the cash received'), [v=>Number(v)>=o.total, `Cash received must be at least ${peso(o.total)}`]]} : {}),
+    ...(to==='Cancelled' ? {reason:[req('Select a reason')]} : {}),
+    ...(FINAL.includes(to) ? {code:[req('Type the last 4 digits'), [v=>v===o.id.slice(-4), `That doesn't match ${o.id}. Check the order number.`]]} : {}),
+  });
+  if (!ok) return;
+  const val = n => f.elements[n]?.value.trim();
+  if (!nextActions(o).some(x=>x.to===to)){ toast(`Invalid status change: ${o.status} → ${to}`,'err'); closeModal(); return; }
+  if (to==='Processing' && !o.stockDeducted){
+    const short = stockItems(o).filter(i=>{ const r=variantBySku(i.sku); return !r || r.v.stock<i.qty; });
+    if (short.length){ closeModal(); confirmModal({title:'Insufficient stock', body:`Cannot start processing — not enough stock for ${short.map(i=>`<b>${i.sku}</b>`).join(', ')}. Inventory cannot go negative. Restock first.`, ok:'Go to inventory', icon:'alert', danger:true, onOk:()=>{ closeModal(); go('/mis/inventory?q='+short[0].sku); }}); return; }
+  }
+  await busy(btn, 500);
+  const snapshot = JSON.stringify({orders:S.orders, products:S.products, payments:S.payments, stockLog:S.stockLog, notifications:S.notifications});
+  const from = o.status;
+  if (to==='Processing' && !o.stockDeducted){ stockItems(o).forEach(i=>{ const r=variantBySku(i.sku); const before=r.v.stock; r.v.stock-=i.qty; S.stockLog.unshift({id:uid('ST'), at:new Date().toISOString(), sku:i.sku, product:i.name, change:-i.qty, before, after:r.v.stock, reason:`Order ${o.id} (Processing)`, by:'System'}); }); o.stockDeducted=true; }
+  const note = to==='Processing'?(o.method==='cod'?'COD order confirmed by phone · stock deducted':'Stock deducted') : to==='Ready to Ship'?'Packed and labelled' : to==='Shipped'?'Handed to courier · '+val('track') : to==='Delivered'?(needs==='cash'?`Delivered · cash ${peso(val('cash'))} collected`:'Delivered to customer') : 'Cancelled: '+val('reason');
+  o.status=to; if (to==='Shipped') o.tracking=val('track'); addHistory(o,to,me().name,note);
+  if (needs==='cash'){ o.paymentStatus='Cash Collected'; S.payments.unshift({id:uid('PAY'), orderId:o.id, customerName:o.customerName, method:'cod', amount:Number(val('cash')), ref:'CASH-'+o.id.slice(-4), submitted:new Date().toISOString(), status:'Verified', reviewedBy:me().name, reviewedAt:new Date().toISOString(), note:'Cash collected on delivery'}); }
+  if (to==='Cancelled' && o.paymentStatus==='Pending Verification'){ S.payments.filter(p=>p.orderId===o.id&&p.status==='Pending Verification').forEach(p=>{p.status='Rejected'; p.reason='Order cancelled: '+val('reason'); p.reviewedBy=me().name; p.reviewedAt=new Date().toISOString();}); o.paymentStatus='Rejected'; }
+  notify(o.customerId, `Order ${o.id} is now ${to}.`, '/account/orders/'+o.id);
+  save(); closeModal(); render();
+  toast(`${o.id} marked as <b>${to}</b>.`, 'ok', {label:'Undo', ms:10000, fn:()=>{
+    const snap = JSON.parse(snapshot); Object.assign(S, snap);
+    const back = S.orders.find(x=>x.id===o.id); addHistory(back, from, me().name, `Reverted accidental change to ${to} (undo)`);
+    save(); render(); toast(`Undone — ${o.id} is back to ${from}. Stock and payments restored.`,'info');
+  }});
 });
 
 /* ---------------- Payment verification ---------------- */
